@@ -1,14 +1,21 @@
 package com.kk.taurus.ijkplayer;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.media.AudioManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.text.TextUtils;
+import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 
 import com.kk.taurus.playerbase.config.AppContextAttach;
+import com.kk.taurus.playerbase.config.PlayerConfig;
+import com.kk.taurus.playerbase.config.PlayerLibrary;
 import com.kk.taurus.playerbase.entity.DataSource;
+import com.kk.taurus.playerbase.entity.DecoderPlan;
 import com.kk.taurus.playerbase.event.BundlePool;
 import com.kk.taurus.playerbase.event.EventKey;
 import com.kk.taurus.playerbase.event.OnErrorEventListener;
@@ -16,7 +23,6 @@ import com.kk.taurus.playerbase.event.OnPlayerEventListener;
 import com.kk.taurus.playerbase.log.PLog;
 import com.kk.taurus.playerbase.player.BaseInternalPlayer;
 
-import java.io.FileDescriptor;
 import java.util.HashMap;
 
 import tv.danmaku.ijk.media.player.IMediaPlayer;
@@ -29,14 +35,26 @@ import tv.danmaku.ijk.media.player.IjkMediaPlayer;
 public class IjkPlayer extends BaseInternalPlayer {
     private final String TAG = "IjkPlayer";
 
+    public static final int PLAN_ID = 100;
+
     private IjkMediaPlayer mMediaPlayer;
 
     private int mTargetState;
 
     private int startSeekPos;
 
+    public static void init(Context context){
+        PlayerConfig.addDecoderPlan(new DecoderPlan(
+                PLAN_ID,
+                IjkPlayer.class.getName(),
+                "ijkplayer"));
+        PlayerConfig.setDefaultPlanId(PLAN_ID);
+        PlayerLibrary.init(context);
+    }
+
     public IjkPlayer() {
-        init();
+        // init player
+        mMediaPlayer = createPlayer();
     }
 
     static {
@@ -44,17 +62,16 @@ public class IjkPlayer extends BaseInternalPlayer {
         IjkMediaPlayer.native_profileBegin("libijkplayer.so");
     }
 
-    private void init() {
-        // init player
-        mMediaPlayer = createPlayer();
-    }
-
-    private IjkMediaPlayer createPlayer(){
+    protected IjkMediaPlayer createPlayer(){
         IjkMediaPlayer ijkMediaPlayer = new IjkMediaPlayer();
 //        ijkMediaPlayer.native_setLogLevel(IjkMediaPlayer.IJK_LOG_DEBUG);
 
+        //设置清除dns cache
+        //IjkMediaPlayer.OPT_CATEGORY_FORMAT, "dns_cache_clear", 1
+
         //open mediacodec
         ijkMediaPlayer.setOption(IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec", 1);
+        ijkMediaPlayer.setOption(IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-hevc", 1);
 
         //accurate seek
         ijkMediaPlayer.setOption(IjkMediaPlayer.OPT_CATEGORY_PLAYER, "enable-accurate-seek", 1);
@@ -99,23 +116,36 @@ public class IjkPlayer extends BaseInternalPlayer {
             mMediaPlayer.setOnBufferingUpdateListener(mBufferingUpdateListener);
             updateStatus(STATE_INITIALIZED);
 
+            if(dataSource.getTimedTextSource()!=null){
+                PLog.e(TAG,"ijkplayer not support timed text !");
+            }
+
+            Context applicationContext = AppContextAttach.getApplicationContext();
             String data = dataSource.getData();
             Uri uri = dataSource.getUri();
+            String assetsPath = dataSource.getAssetsPath();
             HashMap<String, String> headers = dataSource.getExtra();
-            FileDescriptor fileDescriptor = dataSource.getFileDescriptor();
+            int rawId = dataSource.getRawId();
             if(data!=null){
                 if(headers==null)
                     mMediaPlayer.setDataSource(data);
                 else
                     mMediaPlayer.setDataSource(data, headers);
             }else if(uri!=null){
-                Context applicationContext = AppContextAttach.getApplicationContext();
-                if(headers==null)
-                    mMediaPlayer.setDataSource(applicationContext, uri);
-                else
-                    mMediaPlayer.setDataSource(applicationContext, uri, headers);
-            }else if(fileDescriptor!=null){
-                mMediaPlayer.setDataSource(fileDescriptor);
+                if(uri.getScheme().equals(ContentResolver.SCHEME_ANDROID_RESOURCE)){
+                    mMediaPlayer.setDataSource(RawDataSourceProvider.create(applicationContext, uri));
+                }else{
+                    if(headers==null)
+                        mMediaPlayer.setDataSource(applicationContext, uri);
+                    else
+                        mMediaPlayer.setDataSource(applicationContext, uri, headers);
+                }
+            }else if(!TextUtils.isEmpty(assetsPath)){
+                Log.e(TAG,"ijkplayer not support assets play, you can use raw play.");
+            }else if(rawId > 0
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH){
+                Uri rawUri = DataSource.buildRawPath(applicationContext.getPackageName(), rawId);
+                mMediaPlayer.setDataSource(RawDataSourceProvider.create(applicationContext, rawUri));
             }
 
             mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
@@ -164,7 +194,14 @@ public class IjkPlayer extends BaseInternalPlayer {
     @Override
     public void pause() {
         try{
-            if(available()){
+            int state = getState();
+            if(available()
+                    && state!=STATE_END
+                    && state!=STATE_ERROR
+                    && state!=STATE_IDLE
+                    && state!=STATE_INITIALIZED
+                    && state!=STATE_PAUSED
+                    && state!=STATE_STOPPED){
                 mMediaPlayer.pause();
                 updateStatus(STATE_PAUSED);
                 submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PAUSE, null);
@@ -345,17 +382,18 @@ public class IjkPlayer extends BaseInternalPlayer {
             PLog.d(TAG,"onPrepared...");
             updateStatus(STATE_PREPARED);
 
-            submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED,null);
-
-            // Get the capabilities of the player for this stream
-            // REMOVED: Metadata
-
             mVideoWidth = mp.getVideoWidth();
             mVideoHeight = mp.getVideoHeight();
 
+            Bundle bundle = BundlePool.obtain();
+            bundle.putInt(EventKey.INT_ARG1, mVideoWidth);
+            bundle.putInt(EventKey.INT_ARG2, mVideoHeight);
+
+            submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED,bundle);
+
             int seekToPosition = startSeekPos;  // mSeekWhenPrepared may be changed after seekTo() call
             if (seekToPosition != 0) {
-                seekTo(seekToPosition);
+                mMediaPlayer.seekTo(seekToPosition);
                 startSeekPos = 0;
             }
 

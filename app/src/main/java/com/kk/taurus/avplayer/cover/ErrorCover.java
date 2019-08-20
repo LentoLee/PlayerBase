@@ -13,7 +13,6 @@ import com.kk.taurus.playerbase.event.BundlePool;
 import com.kk.taurus.playerbase.event.EventKey;
 import com.kk.taurus.playerbase.event.OnPlayerEventListener;
 import com.kk.taurus.playerbase.receiver.BaseCover;
-import com.kk.taurus.playerbase.receiver.ICover;
 import com.kk.taurus.playerbase.utils.NetworkUtils;
 
 import butterknife.BindView;
@@ -114,7 +113,7 @@ public class ErrorCover extends BaseCover {
     }
 
     private void handleStatusUI(int networkState) {
-        if(!getGroupValue().getBoolean(DataInter.Key.KEY_NETWORK_RESOURCE))
+        if(!getGroupValue().getBoolean(DataInter.Key.KEY_NETWORK_RESOURCE, true))
             return;
         if(networkState < 0){
             mStatus = STATUS_NETWORK_ERROR;
@@ -191,6 +190,6 @@ public class ErrorCover extends BaseCover {
 
     @Override
     public int getCoverLevel() {
-        return ICover.COVER_LEVEL_MEDIUM;
+        return levelHigh(0);
     }
 }

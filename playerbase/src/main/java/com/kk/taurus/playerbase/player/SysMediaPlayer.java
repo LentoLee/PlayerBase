@@ -24,10 +24,12 @@ import android.media.PlaybackParams;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.TextUtils;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 
 import com.kk.taurus.playerbase.config.AppContextAttach;
+import com.kk.taurus.playerbase.entity.TimedTextSource;
 import com.kk.taurus.playerbase.log.PLog;
 import com.kk.taurus.playerbase.entity.DataSource;
 import com.kk.taurus.playerbase.event.BundlePool;
@@ -35,7 +37,6 @@ import com.kk.taurus.playerbase.event.EventKey;
 import com.kk.taurus.playerbase.event.OnErrorEventListener;
 import com.kk.taurus.playerbase.event.OnPlayerEventListener;
 
-import java.io.FileDescriptor;
 import java.util.HashMap;
 
 /**
@@ -53,6 +54,8 @@ public class SysMediaPlayer extends BaseInternalPlayer {
     private int mTargetState;
 
     private long mBandWidth;
+
+    private DataSource mDataSource;
 
     public SysMediaPlayer() {
         init();
@@ -82,24 +85,35 @@ public class SysMediaPlayer extends BaseInternalPlayer {
             mMediaPlayer.setOnBufferingUpdateListener(mBufferingUpdateListener);
             updateStatus(STATE_INITIALIZED);
 
+            this.mDataSource = dataSource;
+            Context applicationContext = AppContextAttach.getApplicationContext();
             String data = dataSource.getData();
             Uri uri = dataSource.getUri();
+            String assetsPath = dataSource.getAssetsPath();
             HashMap<String, String> headers = dataSource.getExtra();
-            FileDescriptor fileDescriptor = dataSource.getFileDescriptor();
-            AssetFileDescriptor assetFileDescriptor = dataSource.getAssetFileDescriptor();
+            int rawId = dataSource.getRawId();
             if(data!=null){
                 mMediaPlayer.setDataSource(data);
             }else if(uri!=null){
-                Context applicationContext = AppContextAttach.getApplicationContext();
                 if(headers==null)
                     mMediaPlayer.setDataSource(applicationContext, uri);
                 else
                     mMediaPlayer.setDataSource(applicationContext, uri, headers);
-            }else if(fileDescriptor!=null){
-                mMediaPlayer.setDataSource(fileDescriptor);
-            }else if(assetFileDescriptor!=null
-                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N){
-                mMediaPlayer.setDataSource(assetFileDescriptor);
+            }else if(!TextUtils.isEmpty(assetsPath)){
+                //assets play. use FileDescriptor play
+                AssetFileDescriptor fileDescriptor = DataSource.getAssetsFileDescriptor(
+                        applicationContext, dataSource.getAssetsPath());
+                if(fileDescriptor!=null){
+                    if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.N){
+                        mMediaPlayer.setDataSource(fileDescriptor);
+                    }else{
+                        mMediaPlayer.setDataSource(fileDescriptor.getFileDescriptor(),
+                                fileDescriptor.getStartOffset(), fileDescriptor.getLength());
+                    }
+                }
+            }else if(rawId > 0){
+                Uri rawUri = DataSource.buildRawPath(applicationContext.getPackageName(), rawId);
+                mMediaPlayer.setDataSource(applicationContext, rawUri);
             }
 
             mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
@@ -153,12 +167,31 @@ public class SysMediaPlayer extends BaseInternalPlayer {
 
     @Override
     public void setSpeed(float speed) {
-        if(available() && Build.VERSION.SDK_INT>=Build.VERSION_CODES.M){
-            PlaybackParams playbackParams = mMediaPlayer.getPlaybackParams();
-            playbackParams.setSpeed(speed);
-            mMediaPlayer.setPlaybackParams(playbackParams);
-        }else{
-            PLog.e(TAG,"not support play speed setting.");
+        try {
+            if(available() && Build.VERSION.SDK_INT>=Build.VERSION_CODES.M){
+                PlaybackParams playbackParams = mMediaPlayer.getPlaybackParams();
+                playbackParams.setSpeed(speed);
+                /**
+                 * Sets playback rate using {@link PlaybackParams}. The object sets its internal
+                 * PlaybackParams to the input, except that the object remembers previous speed
+                 * when input speed is zero. This allows the object to resume at previous speed
+                 * when start() is called. Calling it before the object is prepared does not change
+                 * the object state. After the object is prepared, calling it with zero speed is
+                 * equivalent to calling pause(). After the object is prepared, calling it with
+                 * non-zero speed is equivalent to calling start().
+                 */
+                mMediaPlayer.setPlaybackParams(playbackParams);
+                if(speed <= 0){
+                    pause();
+                }else if(speed > 0 && getState()==STATE_PAUSED){
+                    resume();
+                }
+            }else{
+                PLog.e(TAG,"not support play speed setting.");
+            }
+        }catch (Exception e){
+            PLog.e(TAG,"IllegalStateException， if the internal player engine has not been initialized " +
+                    "or has been released.");
         }
     }
 
@@ -246,7 +279,14 @@ public class SysMediaPlayer extends BaseInternalPlayer {
     @Override
     public void pause() {
         try{
-            if(available()){
+            int state = getState();
+            if(available()
+                    && state!=STATE_END
+                    && state!=STATE_ERROR
+                    && state!=STATE_IDLE
+                    && state!=STATE_INITIALIZED
+                    && state!=STATE_PAUSED
+                    && state!=STATE_STOPPED){
                 mMediaPlayer.pause();
                 updateStatus(STATE_PAUSED);
                 submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PAUSE, null);
@@ -341,13 +381,14 @@ public class SysMediaPlayer extends BaseInternalPlayer {
             PLog.d(TAG,"onPrepared...");
             updateStatus(STATE_PREPARED);
 
-            submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED,null);
-
-            // Get the capabilities of the player for this stream
-            // REMOVED: Metadata
-
             mVideoWidth = mp.getVideoWidth();
             mVideoHeight = mp.getVideoHeight();
+
+            Bundle bundle = BundlePool.obtain();
+            bundle.putInt(EventKey.INT_ARG1, mVideoWidth);
+            bundle.putInt(EventKey.INT_ARG2, mVideoHeight);
+
+            submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED,bundle);
 
             int seekToPosition = startSeekPos;  // mSeekWhenPrepared may be changed after seekTo() call
             if (seekToPosition != 0) {
@@ -367,8 +408,35 @@ public class SysMediaPlayer extends BaseInternalPlayer {
                     || mTargetState == STATE_IDLE){
                 reset();
             }
+            attachTimedTextSource();
         }
     };
+
+    private void attachTimedTextSource() {
+        TimedTextSource timedTextSource = mDataSource.getTimedTextSource();
+        if(timedTextSource==null)
+            return;
+        try{
+            if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN){
+                mMediaPlayer.addTimedTextSource(timedTextSource.getPath(), timedTextSource.getMimeType());
+                MediaPlayer.TrackInfo[] trackInfos = mMediaPlayer.getTrackInfo();
+                if (trackInfos != null && trackInfos.length > 0){
+                    for (int i = 0; i < trackInfos.length; i++){
+                        final MediaPlayer.TrackInfo info = trackInfos[i];
+                        if (info.getTrackType() == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT){
+                            mMediaPlayer.selectTrack(i);
+                            break;
+                        }
+                    }
+                }
+            }else{
+                PLog.e(TAG,"not support setting timed text source !");
+            }
+        }catch (Exception e){
+            PLog.e(TAG,"addTimedTextSource error !");
+            e.printStackTrace();
+        }
+    }
 
     private int mVideoWidth;
     private int mVideoHeight;

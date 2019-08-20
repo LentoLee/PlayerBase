@@ -27,6 +27,8 @@ import android.view.View;
 import com.kk.taurus.playerbase.log.PLog;
 import com.kk.taurus.playerbase.player.IPlayer;
 
+import java.lang.ref.WeakReference;
+
 /**
  * Created by Taurus on 2017/11/19.
  *
@@ -45,6 +47,8 @@ public class RenderTextureView extends TextureView implements IRender {
     private SurfaceTexture mSurfaceTexture;
 
     private boolean mTakeOverSurfaceTexture;
+
+    private boolean isReleased;
 
     public RenderTextureView(Context context) {
         this(context, null);
@@ -122,15 +126,32 @@ public class RenderTextureView extends TextureView implements IRender {
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         PLog.d(TAG,"onTextureViewDetachedFromWindow");
+        //fixed bug on before android 4.4
+        //modify 2018/11/16
+        //java.lang.RuntimeException: Error during detachFromGLContext (see logcat for details)
+        //   at android.graphics.SurfaceTexture.detachFromGLContext(SurfaceTexture.java:215)
+        if(Build.VERSION.SDK_INT <= Build.VERSION_CODES.KITKAT){
+            release();
+        }
     }
 
     @Override
     public void release() {
-        setSurfaceTextureListener(null);
         if(mSurfaceTexture!=null){
             mSurfaceTexture.release();
             mSurfaceTexture = null;
         }
+        if(mSurface!=null){
+            mSurface.release();
+            mSurface = null;
+        }
+        setSurfaceTextureListener(null);
+        isReleased = true;
+    }
+
+    @Override
+    public boolean isReleased() {
+        return isReleased;
     }
 
     private  Surface mSurface;
@@ -149,19 +170,27 @@ public class RenderTextureView extends TextureView implements IRender {
 
     private static final class InternalRenderHolder implements IRenderHolder{
 
-        private Surface mSurfaceRefer;
-        private RenderTextureView mTextureView;
+        private WeakReference<Surface> mSurfaceRefer;
+        private WeakReference<RenderTextureView> mTextureRefer;
 
         public InternalRenderHolder(RenderTextureView textureView, SurfaceTexture surfaceTexture){
-            this.mTextureView = textureView;
-            mSurfaceRefer = new Surface(surfaceTexture);
+            mTextureRefer = new WeakReference<>(textureView);
+            mSurfaceRefer = new WeakReference<>(new Surface(surfaceTexture));
+        }
+
+        RenderTextureView getTextureView(){
+            if(mTextureRefer!=null){
+                return mTextureRefer.get();
+            }
+            return null;
         }
 
         @Override
         public void bindPlayer(IPlayer player) {
-            if(player!=null && mSurfaceRefer!=null){
-                SurfaceTexture surfaceTexture = mTextureView.getOwnSurfaceTexture();
-                SurfaceTexture useTexture = mTextureView.getSurfaceTexture();
+            RenderTextureView textureView = getTextureView();
+            if(player!=null && mSurfaceRefer!=null && textureView!=null){
+                SurfaceTexture surfaceTexture = textureView.getOwnSurfaceTexture();
+                SurfaceTexture useTexture = textureView.getSurfaceTexture();
                 boolean isReleased = false;
                 //check the SurfaceTexture is released is Android O.
                 if(surfaceTexture!=null && Build.VERSION.SDK_INT>=Build.VERSION_CODES.O){
@@ -169,32 +198,35 @@ public class RenderTextureView extends TextureView implements IRender {
                 }
                 boolean available = surfaceTexture!=null && !isReleased;
                 //When the user sets the takeover flag and SurfaceTexture is available.
-                if(mTextureView.isTakeOverSurfaceTexture()
+                if(textureView.isTakeOverSurfaceTexture()
                         && available
                         && Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN){
                     //if SurfaceTexture not set or current is null, need set it.
                     if(!surfaceTexture.equals(useTexture)){
-                        mTextureView.setSurfaceTexture(surfaceTexture);
+                        textureView.setSurfaceTexture(surfaceTexture);
                         PLog.d("RenderTextureView","****setSurfaceTexture****");
                     }else{
-                        Surface surface = mTextureView.getSurface();
+                        Surface surface = textureView.getSurface();
                         //release current Surface if not null.
                         if(surface!=null){
                             surface.release();
                         }
                         //create Surface use update SurfaceTexture
-                        Surface newSurface = new Surface(mTextureView.getOwnSurfaceTexture());
+                        Surface newSurface = new Surface(surfaceTexture);
                         //set it for player
                         player.setSurface(newSurface);
                         //record the new Surface
-                        mTextureView.setSurface(newSurface);
+                        textureView.setSurface(newSurface);
                         PLog.d("RenderTextureView","****bindSurface****");
                     }
                 }else{
-                    player.setSurface(mSurfaceRefer);
-                    //record the Surface
-                    mTextureView.setSurface(mSurfaceRefer);
-                    PLog.d("RenderTextureView","****bindSurface****");
+                    Surface surface = mSurfaceRefer.get();
+                    if(surface!=null){
+                        player.setSurface(surface);
+                        //record the Surface
+                        textureView.setSurface(surface);
+                        PLog.d("RenderTextureView","****bindSurface****");
+                    }
                 }
             }
         }
@@ -230,6 +262,14 @@ public class RenderTextureView extends TextureView implements IRender {
             }
             if(mTakeOverSurfaceTexture)
                 mSurfaceTexture = surface;
+            //fixed bug on before android 4.4
+            //modify 2018/11/16
+            //java.lang.RuntimeException: Error during detachFromGLContext (see logcat for details)
+            //   at android.graphics.SurfaceTexture.detachFromGLContext(SurfaceTexture.java:215)
+            //all return false.
+            if(Build.VERSION.SDK_INT <= Build.VERSION_CODES.KITKAT){
+                return false;
+            }
             return !mTakeOverSurfaceTexture;
         }
 

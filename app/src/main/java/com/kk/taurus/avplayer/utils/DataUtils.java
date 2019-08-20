@@ -19,6 +19,8 @@ public class DataUtils {
     public static final String VIDEO_URL_05 = "http://jiajunhui.cn/video/crystalliz.flv";
     public static final String VIDEO_URL_06 = "http://jiajunhui.cn/video/big_buck_bunny.mp4";
     public static final String VIDEO_URL_07 = "http://jiajunhui.cn/video/trailer.mp4";
+    public static final String VIDEO_URL_08 = "https://mov.bn.netease.com/open-movie/nos/mp4/2017/12/04/SD3SUEFFQ_hd.mp4";
+    public static final String VIDEO_URL_09 = "https://mov.bn.netease.com/open-movie/nos/mp4/2017/05/31/SCKR8V6E9_hd.mp4";
 
     public static String[] urls = new String[]{
             VIDEO_URL_01,
@@ -53,6 +55,17 @@ public class DataUtils {
             }
         }
         return videoList;
+    }
+
+    public static List<VideoBean> getVideoList(int index, int offset) {
+        List<VideoBean> videoList = getVideoList();
+        int size = videoList.size();
+        if(index < 0 || index > size-1)
+            return new ArrayList<>();
+        if(index + offset > size-1){
+            offset = size - index;
+        }
+        return videoList.subList(index, index + offset);
     }
 
     public static List<VideoBean> getVideoList() {

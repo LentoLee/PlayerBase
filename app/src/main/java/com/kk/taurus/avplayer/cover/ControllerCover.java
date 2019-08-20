@@ -24,7 +24,6 @@ import com.kk.taurus.playerbase.event.OnPlayerEventListener;
 import com.kk.taurus.playerbase.log.PLog;
 import com.kk.taurus.playerbase.player.IPlayer;
 import com.kk.taurus.playerbase.player.OnTimerUpdateListener;
-import com.kk.taurus.playerbase.receiver.ICover;
 import com.kk.taurus.playerbase.receiver.IReceiverGroup;
 import com.kk.taurus.playerbase.touch.OnTouchGestureListener;
 import com.kk.taurus.playerbase.receiver.BaseCover;
@@ -61,6 +60,8 @@ public class ControllerCover extends BaseCover implements OnTimerUpdateListener,
     ImageView mSwitchScreen;
     @BindView(R.id.cover_player_controller_seek_bar)
     SeekBar mSeekBar;
+    @BindView(R.id.cover_bottom_seek_bar)
+    SeekBar mBottomSeekBar;
 
     private int mBufferPercentage;
 
@@ -265,6 +266,10 @@ public class ControllerCover extends BaseCover implements OnTimerUpdateListener,
         mSwitchScreen.setVisibility(screenSwitchEnable?View.VISIBLE:View.GONE);
     }
 
+    private void setBottomSeekBarState(boolean state){
+        mBottomSeekBar.setVisibility(state?View.VISIBLE:View.GONE);
+    }
+
     private void setGestureEnable(boolean gestureEnable) {
         this.mGestureEnable = gestureEnable;
     }
@@ -335,13 +340,7 @@ public class ControllerCover extends BaseCover implements OnTimerUpdateListener,
             }
         });
         mBottomAnimator.start();
-        if(state){
-            PLog.d(getTag().toString(), "requestNotifyTimer...");
-            requestNotifyTimer();
-        }else{
-            PLog.d(getTag().toString(), "requestStopTimer...");
-            requestStopTimer();
-        }
+        setBottomSeekBarState(!state);
     }
 
     private void setControllerState(boolean state){
@@ -394,11 +393,18 @@ public class ControllerCover extends BaseCover implements OnTimerUpdateListener,
         mSeekBar.setSecondaryProgress(secondProgress);
     }
 
+    private void setBottomSeekProgress(int curr, int duration){
+        mBottomSeekBar.setMax(duration);
+        mBottomSeekBar.setProgress(curr);
+        float secondProgress = mBufferPercentage * 1.0f/100 * duration;
+        mBottomSeekBar.setSecondaryProgress((int) secondProgress);
+    }
+
     @Override
     public void onTimerUpdate(int curr, int duration, int bufferPercentage) {
         if(!mTimerUpdateProgressEnable)
             return;
-        if(mTimeFormat==null){
+        if(mTimeFormat==null || duration != mSeekBar.getMax()){
             mTimeFormat = TimeUtil.getFormat(duration);
         }
         mBufferPercentage = bufferPercentage;
@@ -407,6 +413,7 @@ public class ControllerCover extends BaseCover implements OnTimerUpdateListener,
 
     private void updateUI(int curr, int duration) {
         setSeekProgress(curr, duration);
+        setBottomSeekProgress(curr, duration);
         setCurrTime(curr);
         setTotalTime(duration);
     }
@@ -418,6 +425,7 @@ public class ControllerCover extends BaseCover implements OnTimerUpdateListener,
                 mBufferPercentage = 0;
                 mTimeFormat = null;
                 updateUI(0, 0);
+                setBottomSeekBarState(true);
                 DataSource data = (DataSource) bundle.getSerializable(EventKey.SERIALIZABLE_DATA);
                 getGroupValue().putObject(DataInter.Key.KEY_DATA_SOURCE, data);
                 setTitle(data);
@@ -468,7 +476,7 @@ public class ControllerCover extends BaseCover implements OnTimerUpdateListener,
 
     @Override
     public int getCoverLevel() {
-        return ICover.COVER_LEVEL_LOW;
+        return levelLow(1);
     }
 
     @Override

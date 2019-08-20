@@ -19,6 +19,10 @@ package com.kk.taurus.playerbase.provider;
 import android.os.Bundle;
 import android.support.annotation.NonNull;
 
+import com.kk.taurus.playerbase.entity.DataSource;
+import com.kk.taurus.playerbase.event.BundlePool;
+import com.kk.taurus.playerbase.event.EventKey;
+
 /**
  * Created by Taurus on 2018/4/15.
  */
@@ -44,7 +48,19 @@ public abstract class BaseDataProvider implements IDataProvider {
      * send media data for player. must invocation.
      * @param bundle
      */
+    @Deprecated
     protected final void onProviderMediaDataSuccess(@NonNull Bundle bundle){
+        if(mOnProviderListener!=null)
+            mOnProviderListener.onProviderDataSuccess(PROVIDER_CODE_SUCCESS_MEDIA_DATA, bundle);
+    }
+
+    /**
+     * send media data for player. must invocation.
+     * @param dataSource
+     */
+    protected final void onProviderMediaDataSuccess(@NonNull DataSource dataSource){
+        Bundle bundle = BundlePool.obtain();
+        bundle.putSerializable(EventKey.SERIALIZABLE_DATA, dataSource);
         if(mOnProviderListener!=null)
             mOnProviderListener.onProviderDataSuccess(PROVIDER_CODE_SUCCESS_MEDIA_DATA, bundle);
     }
@@ -57,6 +73,15 @@ public abstract class BaseDataProvider implements IDataProvider {
     protected final void onProviderExtraDataSuccess(int code, Bundle bundle){
         if(mOnProviderListener!=null)
             mOnProviderListener.onProviderDataSuccess(code, bundle);
+    }
+
+    /**
+     * when provider media data error. must invocation.
+     * @param bundle
+     */
+    protected final void onProviderMediaDataError(@NonNull Bundle bundle){
+        if(mOnProviderListener!=null)
+            mOnProviderListener.onProviderError(PROVIDER_CODE_DATA_PROVIDER_ERROR, bundle);
     }
 
     /**

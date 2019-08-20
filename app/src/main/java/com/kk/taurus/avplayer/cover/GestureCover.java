@@ -126,13 +126,17 @@ public class GestureCover extends BaseCover implements OnTouchGestureListener {
                 @Override
                 public String[] filterKeys() {
                     return new String[]{
-                            DataInter.Key.KEY_COMPLETE_SHOW};
+                            DataInter.Key.KEY_COMPLETE_SHOW,
+                            DataInter.Key.KEY_IS_LANDSCAPE
+                    };
                 }
 
                 @Override
                 public void onValueUpdate(String key, Object value) {
-                    if(key.equals(DataInter.Key.KEY_COMPLETE_SHOW)){
+                    if(DataInter.Key.KEY_COMPLETE_SHOW.equals(key)){
                         setGestureEnable(!(boolean) value);
+                    }else if(DataInter.Key.KEY_IS_LANDSCAPE.equals(key)){
+                        notifyWH();
                     }
                 }
             };
@@ -144,11 +148,15 @@ public class GestureCover extends BaseCover implements OnTouchGestureListener {
         getView().getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
             @Override
             public void onGlobalLayout() {
-                mWidth = getView().getWidth();
-                mHeight = getView().getHeight();
+                notifyWH();
                 getView().getViewTreeObserver().removeOnGlobalLayoutListener(this);
             }
         });
+    }
+
+    private void notifyWH() {
+        mWidth = getView().getWidth();
+        mHeight = getView().getHeight();
     }
 
     @Override
@@ -206,6 +214,11 @@ public class GestureCover extends BaseCover implements OnTouchGestureListener {
     @Override
     public View onCreateCoverView(Context context) {
         return View.inflate(context, R.layout.layout_gesture_cover, null);
+    }
+
+    @Override
+    public int getCoverLevel() {
+        return levelLow(0);
     }
 
     @Override

@@ -27,28 +27,35 @@ import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
 import com.google.android.exoplayer2.ExoPlaybackException;
 import com.google.android.exoplayer2.ExoPlayerFactory;
+import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.PlaybackParameters;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.RenderersFactory;
 import com.google.android.exoplayer2.SimpleExoPlayer;
-import com.google.android.exoplayer2.Timeline;
-import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory;
-import com.google.android.exoplayer2.extractor.ExtractorsFactory;
 import com.google.android.exoplayer2.source.ExtractorMediaSource;
 import com.google.android.exoplayer2.source.MediaSource;
+import com.google.android.exoplayer2.source.MergingMediaSource;
+import com.google.android.exoplayer2.source.SingleSampleMediaSource;
 import com.google.android.exoplayer2.source.TrackGroupArray;
 import com.google.android.exoplayer2.source.dash.DashMediaSource;
-import com.google.android.exoplayer2.source.dash.DefaultDashChunkSource;
 import com.google.android.exoplayer2.source.hls.HlsMediaSource;
-import com.google.android.exoplayer2.source.smoothstreaming.DefaultSsChunkSource;
 import com.google.android.exoplayer2.source.smoothstreaming.SsMediaSource;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
 import com.google.android.exoplayer2.trackselection.TrackSelectionArray;
+import com.google.android.exoplayer2.upstream.AssetDataSource;
+import com.google.android.exoplayer2.upstream.DataSpec;
 import com.google.android.exoplayer2.upstream.DefaultBandwidthMeter;
 import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory;
+import com.google.android.exoplayer2.upstream.DefaultHttpDataSourceFactory;
+import com.google.android.exoplayer2.upstream.RawResourceDataSource;
 import com.google.android.exoplayer2.util.Util;
+import com.google.android.exoplayer2.video.VideoListener;
 import com.kk.taurus.playerbase.config.AppContextAttach;
+import com.kk.taurus.playerbase.config.PlayerConfig;
+import com.kk.taurus.playerbase.config.PlayerLibrary;
 import com.kk.taurus.playerbase.entity.DataSource;
+import com.kk.taurus.playerbase.entity.DecoderPlan;
+import com.kk.taurus.playerbase.entity.TimedTextSource;
 import com.kk.taurus.playerbase.event.BundlePool;
 import com.kk.taurus.playerbase.event.EventKey;
 import com.kk.taurus.playerbase.event.OnErrorEventListener;
@@ -57,9 +64,13 @@ import com.kk.taurus.playerbase.log.PLog;
 import com.kk.taurus.playerbase.player.BaseInternalPlayer;
 import com.kk.taurus.playerbase.player.IPlayer;
 
+import java.util.HashMap;
+
 public class ExoMediaPlayer extends BaseInternalPlayer {
 
     private final String TAG = "ExoMediaPlayer";
+
+    public static final int PLAN_ID = 200;
 
     private final Context mAppContext;
     private SimpleExoPlayer mInternalPlayer;
@@ -74,12 +85,21 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
 
     private final DefaultBandwidthMeter mBandwidthMeter;
 
+    public static void init(Context context){
+        PlayerConfig.addDecoderPlan(new DecoderPlan(
+                PLAN_ID,
+                ExoMediaPlayer.class.getName(),
+                "exoplayer"));
+        PlayerConfig.setDefaultPlanId(PLAN_ID);
+        PlayerLibrary.init(context);
+    }
+
     public ExoMediaPlayer(){
         mAppContext = AppContextAttach.getApplicationContext();
         RenderersFactory renderersFactory = new DefaultRenderersFactory(mAppContext);
         DefaultTrackSelector trackSelector =
                 new DefaultTrackSelector();
-        mInternalPlayer = ExoPlayerFactory.newSimpleInstance(renderersFactory, trackSelector);
+        mInternalPlayer = ExoPlayerFactory.newSimpleInstance(mAppContext, renderersFactory, trackSelector);
 
         // Measures bandwidth during playback. Can be null if not required.
         mBandwidthMeter = new DefaultBandwidthMeter();
@@ -90,9 +110,12 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
 
     @Override
     public void setDataSource(DataSource dataSource) {
-        mInternalPlayer.setVideoListener(mVideoListener);
+        updateStatus(STATE_INITIALIZED);
+        mInternalPlayer.addVideoListener(mVideoListener);
         String data = dataSource.getData();
         Uri uri = dataSource.getUri();
+        String assetsPath = dataSource.getAssetsPath();
+        int rawId = dataSource.getRawId();
 
         Uri videoUri = null;
 
@@ -100,6 +123,24 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
             videoUri = Uri.parse(data);
         }else if(uri!=null){
             videoUri = uri;
+        }else if(!TextUtils.isEmpty(assetsPath)){
+            try {
+                DataSpec dataSpec = new DataSpec(DataSource.buildAssetsUri(assetsPath));
+                AssetDataSource assetDataSource = new AssetDataSource(mAppContext);
+                assetDataSource.open(dataSpec);
+                videoUri = assetDataSource.getUri();
+            } catch (AssetDataSource.AssetDataSourceException e) {
+                e.printStackTrace();
+            }
+        }else if(rawId > 0){
+            try {
+                DataSpec dataSpec = new DataSpec(RawResourceDataSource.buildRawResourceUri(dataSource.getRawId()));
+                RawResourceDataSource rawResourceDataSource = new RawResourceDataSource(mAppContext);
+                rawResourceDataSource.open(dataSpec);
+                videoUri = rawResourceDataSource.getUri();
+            } catch (RawResourceDataSource.RawResourceDataSourceException e) {
+                e.printStackTrace();
+            }
         }
 
         if(videoUri==null){
@@ -109,9 +150,39 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
             return;
         }
 
+        //create DefaultDataSourceFactory
+        com.google.android.exoplayer2.upstream.DataSource.Factory dataSourceFactory =
+                new DefaultDataSourceFactory(mAppContext,
+                        Util.getUserAgent(mAppContext, mAppContext.getPackageName()), mBandwidthMeter);
+
+        //if scheme is http or https and DataSource contain extra data, use DefaultHttpDataSourceFactory.
+        String scheme = videoUri.getScheme();
+        HashMap<String, String> extra = dataSource.getExtra();
+        if(extra!=null && extra.size()>0 &&
+                ("http".equalsIgnoreCase(scheme)||"https".equalsIgnoreCase(scheme))){
+            dataSourceFactory = new DefaultHttpDataSourceFactory(
+                    Util.getUserAgent(mAppContext, mAppContext.getPackageName()));
+            ((DefaultHttpDataSourceFactory)dataSourceFactory).getDefaultRequestProperties().set(extra);
+        }
+
         // Prepare the player with the source.
         isPreparing = true;
-        mInternalPlayer.prepare(getMediaSource(videoUri));
+
+        //create MediaSource
+        MediaSource mediaSource = getMediaSource(videoUri, dataSourceFactory);
+
+        //handle timed text source
+        TimedTextSource timedTextSource = dataSource.getTimedTextSource();
+        if(timedTextSource!=null){
+            Format format = Format.createTextSampleFormat(null, timedTextSource.getMimeType(), timedTextSource.getFlag(), null);
+            MediaSource timedTextMediaSource = new SingleSampleMediaSource.Factory(new DefaultDataSourceFactory(mAppContext,
+                    Util.getUserAgent(mAppContext, mAppContext.getPackageName())))
+                    .createMediaSource(Uri.parse(timedTextSource.getPath()), format, C.TIME_UNSET);
+            //merge MediaSource and timedTextMediaSource.
+            mediaSource = new MergingMediaSource(mediaSource, timedTextMediaSource);
+        }
+
+        mInternalPlayer.prepare(mediaSource);
         mInternalPlayer.setPlayWhenReady(false);
 
         Bundle sourceBundle = BundlePool.obtain();
@@ -120,27 +191,19 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
 
     }
 
-    private MediaSource getMediaSource(Uri uri){
+    private MediaSource getMediaSource(Uri uri, com.google.android.exoplayer2.upstream.DataSource.Factory dataSourceFactory){
         int contentType = Util.inferContentType(uri);
-        DefaultDataSourceFactory dataSourceFactory =
-                new DefaultDataSourceFactory(mAppContext,
-                        Util.getUserAgent(mAppContext, mAppContext.getPackageName()), mBandwidthMeter);
         switch (contentType) {
             case C.TYPE_DASH:
-                DefaultDashChunkSource.Factory factory = new DefaultDashChunkSource.Factory(dataSourceFactory);
-                return new DashMediaSource(uri, dataSourceFactory, factory, null, null);
+                return new DashMediaSource.Factory(dataSourceFactory).createMediaSource(uri);
             case C.TYPE_SS:
-                DefaultSsChunkSource.Factory ssFactory = new DefaultSsChunkSource.Factory(dataSourceFactory);
-                return new SsMediaSource(uri, dataSourceFactory, ssFactory, null, null);
+                return new SsMediaSource.Factory(dataSourceFactory).createMediaSource(uri);
             case C.TYPE_HLS:
-                return new HlsMediaSource(uri, dataSourceFactory, null, null);
-
+                return new HlsMediaSource.Factory(dataSourceFactory).createMediaSource(uri);
             case C.TYPE_OTHER:
             default:
                 // This is the MediaSource representing the media to be played.
-                ExtractorsFactory extractorsFactory = new DefaultExtractorsFactory();
-                return new ExtractorMediaSource(uri,
-                        dataSourceFactory, extractorsFactory, null, null);
+                return new ExtractorMediaSource.Factory(dataSourceFactory).createMediaSource(uri);
         }
     }
 
@@ -221,13 +284,20 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
 
     @Override
     public void pause() {
-        if(isInPlaybackState())
+        int state = getState();
+        if(isInPlaybackState()
+                && state!=STATE_END
+                && state!=STATE_ERROR
+                && state!=STATE_IDLE
+                && state!=STATE_INITIALIZED
+                && state!=STATE_PAUSED
+                && state!=STATE_STOPPED)
             mInternalPlayer.setPlayWhenReady(false);
     }
 
     @Override
     public void resume() {
-        if(isInPlaybackState())
+        if(isInPlaybackState() && getState() == STATE_PAUSED)
             mInternalPlayer.setPlayWhenReady(true);
     }
 
@@ -261,7 +331,7 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
         isBuffering = false;
         updateStatus(IPlayer.STATE_END);
         mInternalPlayer.removeListener(mEventListener);
-        mInternalPlayer.clearVideoListener(mVideoListener);
+        mInternalPlayer.removeVideoListener(mVideoListener);
         mInternalPlayer.release();
     }
 
@@ -273,7 +343,7 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
                 && state!=STATE_STOPPED;
     }
 
-    private SimpleExoPlayer.VideoListener mVideoListener = new SimpleExoPlayer.VideoListener() {
+    private VideoListener mVideoListener = new VideoListener() {
         @Override
         public void onVideoSizeChanged(int width, int height,
                                        int unappliedRotationDegrees, float pixelWidthHeightRatio) {
@@ -296,10 +366,6 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
     };
 
     private Player.EventListener mEventListener = new Player.EventListener() {
-        @Override
-        public void onTimelineChanged(Timeline timeline, Object manifest) {
-            PLog.d(TAG,"onTimelineChanged...");
-        }
 
         @Override
         public void onTracksChanged(TrackGroupArray trackGroups, TrackSelectionArray trackSelections) {
@@ -334,8 +400,20 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
                 switch (playbackState){
                     case Player.STATE_READY:
                         isPreparing = false;
+                        Format format = mInternalPlayer.getVideoFormat();
+                        Bundle bundle = BundlePool.obtain();
+                        if(format!=null){
+                            bundle.putInt(EventKey.INT_ARG1, format.width);
+                            bundle.putInt(EventKey.INT_ARG2, format.height);
+                        }
                         updateStatus(IPlayer.STATE_PREPARED);
-                        submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED, null);
+                        submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED, bundle);
+
+                        if(playWhenReady){
+                            updateStatus(STATE_STARTED);
+                            submitPlayerEvent(OnPlayerEventListener.PLAYER_EVENT_ON_START, null);
+                        }
+
                         if(mStartPos > 0){
                             mInternalPlayer.seekTo(mStartPos);
                             mStartPos = -1;
@@ -410,11 +488,6 @@ public class ExoMediaPlayer extends BaseInternalPlayer {
                     submitErrorEvent(OnErrorEventListener.ERROR_EVENT_UNKNOWN, null);
                     break;
             }
-        }
-
-        @Override
-        public void onPositionDiscontinuity() {
-
         }
 
         @Override

@@ -28,12 +28,15 @@ import com.kk.taurus.playerbase.log.PLog;
 import com.kk.taurus.playerbase.player.BaseInternalPlayer;
 import com.kk.taurus.playerbase.event.BundlePool;
 import com.kk.taurus.playerbase.event.EventKey;
+import com.kk.taurus.playerbase.player.IPlayerProxy;
 import com.kk.taurus.playerbase.player.OnBufferingListener;
 import com.kk.taurus.playerbase.provider.IDataProvider;
 import com.kk.taurus.playerbase.player.IPlayer;
 import com.kk.taurus.playerbase.event.OnErrorEventListener;
 import com.kk.taurus.playerbase.event.OnPlayerEventListener;
 import com.kk.taurus.playerbase.player.TimerCounterProxy;
+import com.kk.taurus.playerbase.record.PlayValueGetter;
+import com.kk.taurus.playerbase.record.RecordProxyPlayer;
 
 /**
  * Created by Taurus on 2018/3/17.
@@ -61,6 +64,10 @@ public final class AVPlayer implements IPlayer{
 
     private int mDecoderPlanId;
 
+    private float mVolumeLeft = -1,mVolumeRight = -1;
+
+    private IPlayerProxy mRecordProxyPlayer;
+
     public AVPlayer(){
         //default load config plan id.
         this(PlayerConfig.getDefaultPlanId());
@@ -71,10 +78,36 @@ public final class AVPlayer implements IPlayer{
      * @param decoderPlanId
      */
     public AVPlayer(int decoderPlanId){
+        handleRecordProxy();
         //init timer counter proxy.
         mTimerCounterProxy = new TimerCounterProxy(1000);
         //init internal player instance.
         loadInternalPlayer(decoderPlanId);
+    }
+
+    private void handleRecordProxy() {
+        if(PlayerConfig.isPlayRecordOpen()){
+            mRecordProxyPlayer = new RecordProxyPlayer(new PlayValueGetter() {
+                @Override
+                public int getCurrentPosition() {
+                    return AVPlayer.this.getCurrentPosition();
+                }
+
+                @Override
+                public int getBufferPercentage() {
+                    return AVPlayer.this.getBufferPercentage();
+                }
+
+                @Override
+                public int getDuration() {
+                    return AVPlayer.this.getDuration();
+                }
+                @Override
+                public int getState() {
+                    return AVPlayer.this.getState();
+                }
+            });
+        }
     }
 
     /**
@@ -92,11 +125,13 @@ public final class AVPlayer implements IPlayer{
                     "init decoder instance failure, please check your configuration" +
                             ", maybe your config classpath not found.");
         DecoderPlan plan = PlayerConfig.getPlan(mDecoderPlanId);
-        PLog.d(TAG,"=============================");
-        PLog.d(TAG,"DecoderPlanInfo : planId      = " + plan.getIdNumber());
-        PLog.d(TAG,"DecoderPlanInfo : classPath   = " + plan.getClassPath());
-        PLog.d(TAG,"DecoderPlanInfo : desc        = " + plan.getDesc());
-        PLog.d(TAG,"=============================");
+        if(plan!=null){
+            PLog.d(TAG,"=============================");
+            PLog.d(TAG,"DecoderPlanInfo : planId      = " + plan.getIdNumber());
+            PLog.d(TAG,"DecoderPlanInfo : classPath   = " + plan.getClassPath());
+            PLog.d(TAG,"DecoderPlanInfo : desc        = " + plan.getDesc());
+            PLog.d(TAG,"=============================");
+        }
     }
 
     /**
@@ -109,7 +144,7 @@ public final class AVPlayer implements IPlayer{
      *
      * @param decoderPlanId the planId is your configuration ids or default id.
      * @return Whether or not to switch to success.
- *             if return false, maybe your incoming planId is the same as the current planId
+     *         if return false, maybe your incoming planId is the same as the current planId
      *         or your incoming planId is illegal param.
      *         return true is switch decoder success.
      *
@@ -175,22 +210,41 @@ public final class AVPlayer implements IPlayer{
             int duration = getDuration();
             int bufferPercentage = getBufferPercentage();
             //check valid data.
-            if(duration <= 0 || curr < 0)
+            if(duration <= 0 && !isLive())
                 return;
-            Bundle bundle = BundlePool.obtain();
-            bundle.putInt(EventKey.INT_ARG1, curr);
-            bundle.putInt(EventKey.INT_ARG2, duration);
-            bundle.putInt(EventKey.INT_ARG3, bufferPercentage);
-            callBackPlayEventListener(
-                    OnPlayerEventListener.PLAYER_EVENT_ON_TIMER_UPDATE, bundle);
+            onTimerUpdateEvent(curr, duration, bufferPercentage);
         }
     };
+
+    private void onTimerUpdateEvent(int curr, int duration, int bufferPercentage) {
+        Bundle bundle = BundlePool.obtain();
+        bundle.putInt(EventKey.INT_ARG1, curr);
+        bundle.putInt(EventKey.INT_ARG2, duration);
+        bundle.putInt(EventKey.INT_ARG3, bufferPercentage);
+        callBackPlayEventListener(
+                OnPlayerEventListener.PLAYER_EVENT_ON_TIMER_UPDATE, bundle);
+    }
 
     private OnPlayerEventListener mInternalPlayerEventListener =
             new OnPlayerEventListener() {
         @Override
         public void onPlayerEvent(int eventCode, Bundle bundle) {
             mTimerCounterProxy.proxyPlayEvent(eventCode, bundle);
+            if(eventCode==OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED){
+                //when prepared set volume value
+                if(mVolumeLeft >= 0 || mVolumeRight >= 0){
+                    mInternalPlayer.setVolume(mVolumeLeft, mVolumeRight);
+                }
+            }else if(eventCode==OnPlayerEventListener.PLAYER_EVENT_ON_PLAY_COMPLETE){
+                int duration = getDuration();
+                int bufferPercentage = getBufferPercentage();
+                //check valid data.
+                if(duration <= 0 && !isLive())
+                    return;
+                onTimerUpdateEvent(duration, duration, bufferPercentage);
+            }
+            if(isPlayRecordOpen())
+                mRecordProxyPlayer.onPlayerEvent(eventCode, bundle);
             callBackPlayEventListener(eventCode, bundle);
         }
     };
@@ -200,6 +254,8 @@ public final class AVPlayer implements IPlayer{
         @Override
         public void onErrorEvent(int eventCode, Bundle bundle) {
             mTimerCounterProxy.proxyErrorEvent(eventCode, bundle);
+            if(isPlayRecordOpen())
+                mRecordProxyPlayer.onErrorEvent(eventCode, bundle);
             callBackErrorEventListener(eventCode, bundle);
         }
     };
@@ -275,13 +331,14 @@ public final class AVPlayer implements IPlayer{
                 //on data provider load data success,need set data to decoder player.
                 case IDataProvider.PROVIDER_CODE_SUCCESS_MEDIA_DATA:
                     if(bundle!=null){
-                        DataSource data =
-                                (DataSource) bundle.getSerializable(EventKey.SERIALIZABLE_DATA);
-                        PLog.d(TAG,"onProviderDataSuccessMediaData : DataSource = " + data);
-                        if(data!=null){
-                            interPlayerSetDataSource(data);
-                            internalPlayerStart(data.getStartPos());
+                        Object obj = bundle.getSerializable(EventKey.SERIALIZABLE_DATA);
+                        if(obj==null || !(obj instanceof DataSource)){
+                            throw new RuntimeException("provider media success SERIALIZABLE_DATA must type of DataSource!");
                         }
+                        DataSource data = (DataSource) obj;
+                        PLog.d(TAG,"onProviderDataSuccessMediaData : DataSource = " + data);
+                        interPlayerSetDataSource(data);
+                        internalPlayerStart(data.getStartPos());
                         //success video data call back.
                         callBackPlayEventListener(
                                 OnPlayerEventListener.PLAYER_EVENT_ON_PROVIDER_DATA_SUCCESS, bundle);
@@ -301,11 +358,15 @@ public final class AVPlayer implements IPlayer{
             if(mOnProviderListener!=null)
                 mOnProviderListener.onProviderError(code, bundle);
             //need recreate a new bundle, because a bundle will be recycle after call back.
-            Bundle errorBundle = new Bundle(bundle);
+            Bundle errorBundle;
+            if(bundle!=null){
+                errorBundle = new Bundle(bundle);
+            }else{
+                errorBundle = new Bundle();
+            }
             errorBundle.putInt(EventKey.INT_DATA,code);
             //call back player event
-            callBackPlayEventListener(
-                    OnPlayerEventListener.PLAYER_EVENT_ON_PROVIDER_DATA_ERROR, bundle);
+            callBackPlayEventListener(code, bundle);
             //call back error event
             callBackErrorEventListener(
                     OnErrorEventListener.ERROR_EVENT_DATA_PROVIDER_ERROR,errorBundle);
@@ -323,17 +384,37 @@ public final class AVPlayer implements IPlayer{
 
     }
 
+    boolean isLive(){
+        return mDataSource!=null && mDataSource.isLive();
+    }
+
     private void interPlayerSetDataSource(DataSource dataSource){
-        if(isPlayerAvailable())
+        if(isPlayerAvailable()){
+            if(isPlayRecordOpen())
+                mRecordProxyPlayer.onDataSourceReady(dataSource);
             mInternalPlayer.setDataSource(dataSource);
+        }
     }
 
     @Override
     public void start() {
-        if(useProvider())
+        int record = getRecord(mDataSource);
+        if(useProvider()){
+            mDataSource.setStartPos(record);
             mDataProvider.handleSourceData(mDataSource);
-        else
-            internalPlayerStart(0);
+        }else{
+            internalPlayerStart(record);
+        }
+    }
+
+    int getRecord(DataSource dataSource){
+        if(isPlayRecordOpen() && dataSource!=null)
+            return mRecordProxyPlayer.getRecord(dataSource);
+        return mDataSource!=null?mDataSource.getStartPos():0;
+    }
+
+    boolean isPlayRecordOpen(){
+        return PlayerConfig.isPlayRecordOpen() && mRecordProxyPlayer!=null;
     }
 
     /**
@@ -388,6 +469,8 @@ public final class AVPlayer implements IPlayer{
 
     @Override
     public void setVolume(float left, float right) {
+        mVolumeLeft = left;
+        mVolumeRight = right;
         if(isPlayerAvailable())
             mInternalPlayer.setVolume(left, right);
     }
@@ -474,6 +557,8 @@ public final class AVPlayer implements IPlayer{
 
     @Override
     public void stop() {
+        if(isPlayRecordOpen())
+            mRecordProxyPlayer.onIntentStop();
         if(useProvider())
             mDataProvider.cancel();
         if(isPlayerAvailable())
@@ -482,6 +567,8 @@ public final class AVPlayer implements IPlayer{
 
     @Override
     public void reset() {
+        if(isPlayRecordOpen())
+            mRecordProxyPlayer.onIntentReset();
         if(useProvider())
             mDataProvider.cancel();
         if(isPlayerAvailable())
@@ -490,10 +577,14 @@ public final class AVPlayer implements IPlayer{
 
     @Override
     public void destroy() {
+        if(isPlayRecordOpen())
+            mRecordProxyPlayer.onIntentDestroy();
         if(useProvider())
             mDataProvider.destroy();
         if(isPlayerAvailable())
             mInternalPlayer.destroy();
+        if(mTimerCounterProxy!=null)
+            mTimerCounterProxy.cancel();
         resetListener();
     }
 }

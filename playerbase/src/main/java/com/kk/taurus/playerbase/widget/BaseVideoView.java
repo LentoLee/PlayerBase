@@ -40,9 +40,9 @@ import com.kk.taurus.playerbase.event.EventKey;
 import com.kk.taurus.playerbase.provider.IDataProvider;
 import com.kk.taurus.playerbase.event.OnErrorEventListener;
 import com.kk.taurus.playerbase.event.OnPlayerEventListener;
+import com.kk.taurus.playerbase.receiver.IReceiverGroup;
 import com.kk.taurus.playerbase.receiver.OnReceiverEventListener;
 import com.kk.taurus.playerbase.receiver.PlayerStateGetter;
-import com.kk.taurus.playerbase.receiver.ReceiverGroup;
 import com.kk.taurus.playerbase.receiver.StateGetter;
 import com.kk.taurus.playerbase.render.AspectRatio;
 import com.kk.taurus.playerbase.render.IRender;
@@ -75,6 +75,7 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
 
     //render view, such as TextureView or SurfaceView.
     private IRender mRender;
+    private AspectRatio mAspectRatio = AspectRatio.AspectRatio_FIT_PARENT;
 
     private int mVideoWidth;
     private int mVideoHeight;
@@ -125,7 +126,7 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
      *
      * @return
      */
-    public SuperContainer getSuperContainer(){
+    public final SuperContainer getSuperContainer(){
         return mSuperContainer;
     }
 
@@ -179,6 +180,14 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
         mPlayer.setDataProvider(dataProvider);
     }
 
+    /**
+     * set a listener for DataProvider handle data source.
+     * @param onProviderListener
+     */
+    public void setOnProviderListener(IDataProvider.OnProviderListener onProviderListener){
+        mPlayer.setOnProviderListener(onProviderListener);
+    }
+
     @Override
     public void setDataSource(DataSource dataSource) {
         //init AudioManager
@@ -194,13 +203,17 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
     private void requestAudioFocus(){
         PLog.d(TAG,">>requestAudioFocus<<");
         AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-        am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        if(am!=null){
+            am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        }
     }
 
     private void releaseAudioFocus(){
         PLog.d(TAG,"<<releaseAudioFocus>>");
         AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-        am.abandonAudioFocus(null);
+        if(am!=null){
+            am.abandonAudioFocus(null);
+        }
     }
 
     /**
@@ -208,7 +221,7 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
      * example if you set a controller cover ,you need self handle seek event etc.
      * @param receiverGroup
      */
-    public void setReceiverGroup(ReceiverGroup receiverGroup){
+    public void setReceiverGroup(IReceiverGroup receiverGroup){
         mSuperContainer.setReceiverGroup(receiverGroup);
     }
 
@@ -287,6 +300,7 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
 
     @Override
     public void setAspectRatio(AspectRatio aspectRatio) {
+        this.mAspectRatio = aspectRatio;
         if(mRender!=null)
             mRender.updateAspectRatio(aspectRatio);
     }
@@ -301,19 +315,28 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
         mPlayer.setSpeed(speed);
     }
 
+    /**
+     * if you want to clear frame and recreate render, call this method.
+     */
+    public void updateRender(){
+        releaseRender();
+        setRenderType(mRenderType);
+    }
+
     @Override
     public void setRenderType(int renderType) {
         boolean renderChange = mRenderType!=renderType;
-        if(!renderChange && mRender!=null)
+        if(!renderChange && mRender!=null && !mRender.isReleased())
             return;
         releaseRender();
-        mRenderType = renderType;
         switch (renderType){
             case IRender.RENDER_TYPE_SURFACE_VIEW:
+                mRenderType = IRender.RENDER_TYPE_SURFACE_VIEW;
                 mRender = new RenderSurfaceView(getContext());
                 break;
             default:
             case IRender.RENDER_TYPE_TEXTURE_VIEW:
+                mRenderType = IRender.RENDER_TYPE_TEXTURE_VIEW;
                 mRender = new RenderTextureView(getContext());
                 ((RenderTextureView)mRender).setTakeOverSurfaceTexture(true);
                 break;
@@ -321,6 +344,7 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
         //clear render holder
         mRenderHolder = null;
         mPlayer.setSurface(null);
+        mRender.updateAspectRatio(mAspectRatio);
         mRender.setRenderCallback(mRenderCallback);
         //update some params
         mRender.updateVideoSize(mVideoWidth, mVideoHeight);
@@ -484,6 +508,11 @@ public class BaseVideoView extends FrameLayout implements IVideoView, IStyleSett
                     break;
                 //when prepared bind surface.
                 case OnPlayerEventListener.PLAYER_EVENT_ON_PREPARED:
+                    if(bundle!=null && mRender!=null){
+                        mVideoWidth = bundle.getInt(EventKey.INT_ARG1);
+                        mVideoHeight = bundle.getInt(EventKey.INT_ARG2);
+                        mRender.updateVideoSize(mVideoWidth, mVideoHeight);
+                    }
                     bindRenderHolder(mRenderHolder);
                     break;
                 case OnPlayerEventListener.PLAYER_EVENT_ON_BUFFERING_START:
